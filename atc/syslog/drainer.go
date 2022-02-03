@@ -183,6 +183,16 @@ func (d *drainer) sendEvent(logger lager.Logger, build db.Build, syslog *Syslog,
 		ts = time.Unix(streamingVolumeEvent.Time, 0)
 		tag = build.SyslogTag(streamingVolumeEvent.Origin.ID)
 		message = fmt.Sprintf("streaming volume %s from %s to %s", streamingVolumeEvent.Volume, streamingVolumeEvent.SourceWorker, streamingVolumeEvent.DestWorker)
+	case event.EventTypeWaitingForStreamedVolume:
+		var waitingForStreamedVolumeEvent event.WaitingForStreamedVolume
+		err := json.Unmarshal(*ev.Data, &waitingForStreamedVolumeEvent)
+		if err != nil {
+			logger.Error("failed-to-unmarshal", err)
+			return err
+		}
+		ts = time.Unix(waitingForStreamedVolumeEvent.Time, 0)
+		tag = build.SyslogTag(waitingForStreamedVolumeEvent.Origin.ID)
+		message = fmt.Sprintf("waiting for volume %s to be streamed to %s", waitingForStreamedVolumeEvent.Volume, waitingForStreamedVolumeEvent.DestWorker)
 	case event.EventTypeStartTask:
 		var startTaskEvent event.StartTask
 		err := json.Unmarshal(*ev.Data, &startTaskEvent)

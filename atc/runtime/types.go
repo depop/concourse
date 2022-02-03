@@ -125,6 +125,7 @@ type ContainerSpec struct {
 }
 
 type BuildStepDelegate interface {
+	WaitingForStreamedVolume(lager.Logger, string, string)
 	StreamingVolume(lager.Logger, string, string, string)
 }
 
