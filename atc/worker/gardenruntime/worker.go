@@ -14,6 +14,7 @@ import (
 	"code.cloudfoundry.org/garden"
 	"code.cloudfoundry.org/lager"
 	"code.cloudfoundry.org/lager/lagerctx"
+	"github.com/concourse/concourse/atc"
 	"github.com/concourse/concourse/atc/db"
 	"github.com/concourse/concourse/atc/db/lock"
 	"github.com/concourse/concourse/atc/metric"
@@ -499,12 +500,23 @@ func (worker *Worker) streamRemoteInputVolume(
 			}
 		}
 
-		lock, acquired, err := worker.acquireVolumeStreamingLock(ctx, input, container)
-		if err != nil {
-			return err
+		// only lock the steams if we allow a streamed volume to be used as a cache
+		// as this prevents non-cacheable streams being processed sequentially
+		// and can be streamed in parallel.
+		stream := true
+		if atc.EnableCacheStreamedVolumes {
+			lock, acquired, err := worker.acquireVolumeStreamingLock(ctx, input, container)
+			if err != nil {
+				return err
+			}
+			if acquired {
+				defer lock.Release()
+				stream = true
+			} else {
+				stream = false
+			}
 		}
-		if acquired {
-			defer lock.Release()
+		if stream {
 			// create an empty volume to stream-in the remote volume. this volume
 			// will only be used as a parent volume (i.e. it won't be directly
 			// mounted to a container) - this is because it may be saved as a
