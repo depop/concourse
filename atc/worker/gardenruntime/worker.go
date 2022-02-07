@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"code.cloudfoundry.org/garden"
 	"code.cloudfoundry.org/lager"
@@ -470,6 +471,84 @@ func (worker *Worker) cloneLocalInputVolumes(
 	return mounts, nil
 }
 
+func (worker *Worker) streamRemoteInputVolume(
+	c chan mountableLocalInput,
+	ctx context.Context,
+	spec runtime.ContainerSpec,
+	privileged bool,
+	container db.CreatingContainer,
+	input remoteInput,
+	delegate runtime.BuildStepDelegate,
+) error {
+	logger := lagerctx.FromContext(ctx)
+	var tick *time.Ticker
+
+	for {
+		// if this is not the first iteration; check if the volume now exists
+		if tick != nil {
+			volume, ok, err := worker.findVolumeForArtifact(ctx, spec.TeamID, input.volume)
+			if err != nil {
+				return err
+			}
+			if ok && volume.DBVolume().WorkerName() == worker.Name() {
+				c <- mountableLocalInput{
+					cowParent: volume.(Volume),
+					mountPath: input.mountPath,
+				}
+				return nil
+			}
+		}
+
+		lock, acquired, err := worker.acquireVolumeStreamingLock(ctx, input, container)
+		if err != nil {
+			return err
+		}
+		if acquired {
+			defer lock.Release()
+			// create an empty volume to stream-in the remote volume. this volume
+			// will only be used as a parent volume (i.e. it won't be directly
+			// mounted to a container) - this is because it may be saved as a
+			// resource cache.
+			//
+			// we use a unique mount path used as a search criteria in
+			// findOrCreateVolumeForContainer so we can distinguish between
+			// streamed-in volumes and mounted volumes.
+			streamedVolume, err := worker.findOrCreateVolumeForStreaming(
+				ctx,
+				privileged,
+				container,
+				spec.TeamID,
+				input.mountPath,
+			)
+			if err != nil {
+				return err
+			}
+
+			c <- mountableLocalInput{
+				cowParent: streamedVolume,
+				mountPath: input.mountPath,
+			}
+
+			_, inputPath := path.Split(input.mountPath)
+			delegate.StreamingVolume(logger, inputPath, input.volume.Source(), streamedVolume.DBVolume().WorkerName())
+			return worker.streamer.Stream(ctx, input.volume, streamedVolume)
+		}
+
+		if tick == nil {
+			delegate.WaitingForStreamedVolume(logger, input.volume.Handle(), container.WorkerName())
+			tick = time.NewTicker(5 * time.Second)
+		}
+		select {
+		case <-ctx.Done():
+			logger.Info("aborted-waiting-for-streaming", lager.Data{"volume": input.volume.Handle()})
+			return ctx.Err()
+		case <-tick.C:
+			logger.Debug("waiting-for-stream-volume-lock", lager.Data{"volume": input.volume.Handle()})
+			continue
+		}
+	}
+}
+
 func (worker *Worker) streamRemoteInputVolumes(
 	ctx context.Context,
 	spec runtime.ContainerSpec,
@@ -482,46 +561,17 @@ func (worker *Worker) streamRemoteInputVolumes(
 	if len(inputs) == 0 {
 		return nil, nil
 	}
-	mounts := make([]mountableLocalInput, len(inputs))
 
 	ctx, span := tracing.StartSpan(ctx, "worker.streamRemoteInputVolumes", tracing.Attrs{"container_id": container.Handle()})
 	defer span.End()
 
 	g, groupCtx := errgroup.WithContext(ctx)
+	mounts := make(chan mountableLocalInput, len(inputs))
 
-	for i, input := range inputs {
-		// capture loop vars so each goroutine gets its own copy
-		i, input := i, input
-
-		// create an empty volume to stream-in the remote volume. this volume
-		// will only be used as a parent volume (i.e. it won't be directly
-		// mounted to a container) - this is because it may be saved as a
-		// resource cache.
-		//
-		// we use a unique mount path used as a search criteria in
-		// findOrCreateVolumeForContainer so we can distinguish between
-		// streamed-in volumes and mounted volumes.
-		streamedVolume, err := worker.findOrCreateVolumeForStreaming(
-			ctx,
-			privileged,
-			container,
-			spec.TeamID,
-			input.mountPath,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		mounts[i] = mountableLocalInput{
-			cowParent: streamedVolume,
-			mountPath: input.mountPath,
-		}
-
-		_, inputPath := path.Split(input.mountPath)
-		delegate.StreamingVolume(logger, inputPath, input.volume.Source(), streamedVolume.DBVolume().WorkerName())
-
+	for _, input := range inputs {
+		input := input // capture loop var so each goroutine gets its own copy
 		g.Go(func() error {
-			return worker.streamer.Stream(groupCtx, input.volume, streamedVolume)
+			return worker.streamRemoteInputVolume(mounts, groupCtx, spec, privileged, container, input, delegate)
 		})
 	}
 
@@ -529,9 +579,26 @@ func (worker *Worker) streamRemoteInputVolumes(
 		return nil, err
 	}
 
-	logger.Debug("streamed-non-local-volumes", lager.Data{"volumes-streamed": len(inputs)})
+	close(mounts)
+	ms := []mountableLocalInput{}
+	for m := range mounts {
+		ms = append(ms, m)
+	}
 
-	return mounts, nil
+	logger.Debug("streamed-non-local-volumes", lager.Data{"volumes-streamed": len(inputs)})
+	return ms, nil
+}
+
+func (worker *Worker) acquireVolumeStreamingLock(
+	ctx context.Context,
+	input remoteInput,
+	container db.CreatingContainer,
+) (lock.Lock, bool, error) {
+	logger := lagerctx.FromContext(ctx)
+	srcVolume, _ := input.volume.(runtime.Volume)
+	handle := srcVolume.Handle()
+
+	return worker.db.LockFactory.Acquire(logger, lock.NewVolumeStreamingLockID(handle, container.WorkerName()))
 }
 
 func (worker *Worker) createOutputVolumes(
