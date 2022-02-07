@@ -175,8 +175,8 @@ handleEvent event ( model, effects ) =
             , effects
             )
 
-        WaitingForStreamedVolume origin volume dest time ->
-            ( updateStep origin.id (setRunning << appendStepLog ("\u{001B}[1mwaiting for volume \u{001B}[0m" ++ volume ++ " \u{001B}[mto be streamed to\u{001B}[0m " ++ dest ++ "\n") time) model
+        WaitingForStreamedVolume origin volume time ->
+            ( updateStep origin.id (setRunning << appendStepLog ("\u{001B}[1mwaiting for volume \u{001B}[0m" ++ volume ++ " \u{001B}[1mto be streamed by another step\n") time) model
             , effects
             )
 
