@@ -1591,9 +1591,6 @@ type existingResource struct {
 }
 
 func existingResources(tx Tx, pipelineID int) (map[string]existingResource, error) {
-	var configBlob, nonce sql.NullString
-	var rcID, rcScopeID sql.NullInt64
-
 	rows, err := psql.Select("name", "config", "type", "nonce", "resource_config_id", "resource_config_scope_id").
 		From("resources").
 		Where(sq.Eq{"pipeline_id": pipelineID}).
@@ -1607,6 +1604,8 @@ func existingResources(tx Tx, pipelineID int) (map[string]existingResource, erro
 	resources := map[string]existingResource{}
 
 	for rows.Next() {
+		var configBlob, nonce sql.NullString
+		var rcID, rcScopeID sql.NullInt64
 		var name string
 		r := &existingResource{}
 		err = rows.Scan(&name, &configBlob, &r.Type, &nonce, &rcID, &rcScopeID)
